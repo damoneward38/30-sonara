@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SONARA — Audio Visualizer</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#05070d;color:#e6edf3;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+header{background:rgba(10,16,28,.9);border-bottom:1px solid #14223c;padding:12px 22px;display:flex;align-items:center;gap:14px;backdrop-filter:blur(8px);z-index:5;flex-shrink:0}
+.logo{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#22d3ee,#4f8cff);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}
+h1{font-size:18px;margin:0}h1 small{color:#6b8598;font-size:10px;display:block;letter-spacing:2px}
+.controls{display:flex;gap:10px;align-items:center;margin-left:auto;flex-wrap:wrap}
+button{background:#14203a;border:1px solid #1e3050;color:#e6edf3;border-radius:8px;padding:7px 14px;cursor:pointer;font-weight:600;font-size:13px}
+button:hover{background:#1e3050}.primary{background:linear-gradient(135deg,#0d9488,#06b6d4);border-color:#06b6d4;color:#fff}
+.sliders{display:flex;gap:14px;align-items:center;background:#0a1420;border:1px solid #14223c;border-radius:10px;padding:6px 14px;flex-wrap:wrap}
+.slier{display:flex;align-items:center;gap:7px;font-size:12px;color:#8aa3b5}
+.slier input{accent-color:#22d3ee;width:90px}
+.slier output{color:#22d3ee;font-weight:700;width:38px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px}
+main{position:relative;flex:1;display:flex;flex-direction:column;overflow:hidden}
+canvas#viz{flex:1;width:100%;display:block;background:#05070d}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;color:#6b8598;font-size:15px;text-align:center}
+.anime{position:absolute;left:12px;bottom:12px;font-size:12px;color:#22d3ee;opacity:.8;pointer-events:none}
+.status{position:absolute;right:14px;top:12px;font-size:11px;color:#4f8cff;font-family:ui-monospace,monospace}
+@media(max-width:760px){.sliders{display:none}}
+</style></head>
+<body>
+<header>
+<div class="logo">SN</div>
+<h1>SONARA<small>AUDIO VISUALIZER</small></h1>
+<div class="controls">
+<button id="srcBtn" class="primary">▶ Generate Tone</button>
+<button id="micBtn">🎙 Mic Mode</button>
+<button id="pauseBtn">⏸ Pause</button>
+<div class="sliders">
+<div class="slier">bars <input id="barCount" type="range" min="12" max="160" value="64"><output id="barCountO">64</output></div>
+<div class="slier">gain <input id="gain" type="range" min="0" max="100" value="35"><output id="gainO">.35</output></div>
+<div class="slier">hue <input id="hue" type="range" min="0" max="360" value="188"><output id="hueO">188</output></div>
+<div class="slier">smth <input id="smth" type="range" min="0" max="100" value="82"><output id="smthO">.82</output></div>
+</div>
+</div>
+</header>
+<main>
+<canvas id="viz"></canvas>
+<div class="overlay" id="overlay">↳ Click <b>Generate Tone</b> to start the audio engine</div>
+<div class="status" id="status">idle</div>
+<div class="anime" id="fps"></div>
+</main>
+<script>
+const cv=document.getElementById('viz'),ctx=cv.getContext('2d');
+const $=id=>document.getElementById(id);
+let audioCtx=null,analyser=null,data=null,tone=null,gainNode=null,master=null;
+let running=false,micMode=false,paused=false,rafs=[];
+let state=Array.from({length:64},()=>Math.random()*0.2);
+
+function setStatus(s){$('status').textContent=s;}
+function b(name){return document.getElementById(name);}
+
+function audio(){
+  if(audioCtx)return;
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  analyser=audioCtx.createAnalyser();
+  analyser.fftSize=1024;
+  data=new Uint8Array(analyser.frequencyBinCount);
+  master=audioCtx.createGain();
+  master.gain.value=0;
+  analyser.connect(master);master.connect(audioCtx.destination);
+}
+
+function on(d){
+  analyser.connect(d);
+}
+
+function startTone(){
+  audio();audioCtx.resume();
+  if(tone){tone.disconnect(toneSource());tone=null;}
+  const oscCount=3;
+  const oscs=[];
+  tone=audioCtx.createGain();tone.gain.value=0.35;
+  [55,110,164.8].forEach((f,i)=>{
+    const o=audioCtx.createOscillator();
+    o.type=['sawtooth','square','sine'][i];
+    o.frequency.value=f;
+    const g=audioCtx.createGain();g.gain.value=[0.5,0.3,0.2][i];
+    o.connect(g);g.connect(tone);
+    o.start();oscs.push(o);
+  });
+  analyser.disconnect(master);tone.connect(analyser);
+  micMode=false;running=true;paused=false;
+  setStatus('tone · fft auto');
+  $('srcBtn').textContent='⏹ Stop Tone';
+  $('overlay').style.display='none';
+}
+
+async function startMic(){
+  audio();await audioCtx.resume();
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    const src=audioCtx.createMediaStreamSource(stream);
+    src.connect(analyser);
+    if(tone){oscs&&oscs.forEach(o=>o.stop());tone=null;}
+    micMode=true;running=true;paused=false;
+    $('srcBtn').textContent='▶ Generate Tone';
+    setStatus('mic · live in');
+    $('overlay').style.display='none';
+  }catch(e){setStatus('mic denied: '+e.name);$('overlay').textContent='Mic unavailable — use Generate Tone.';$('overlay').style.display='flex';}
+}
+let oscs=[];
+function toneSource(){return tone;}
+
+function stopTone(){
+  if(tone){oscs.forEach(o=>{try{o.stop()}catch{}});tone.disconnect&&tone.disconnect();tone=null;}
+  if(audioCtx){try{analyser.disconnect(master)}catch{}}
+  running=false;setStatus('idle');
+  $('srcBtn').textContent='▶ Generate Tone';
+  $('overlay').style.display='flex';$('overlay').innerHTML='↳ Engine stopped';
+}
+
+b('srcBtn').onclick=()=>{if(micMode||running)stopTone();else startTone();};
+b('micBtn').onclick=async()=>{await startMic();};
+b('pauseBtn').onclick=()=>{paused=!paused;b('pauseBtn').textContent=paused?'▶ Resume':'⏸ Pause';};
+
+function syncSliders(){
+  b('barCountO').textContent=b('barCount').value;
+  b('gainO').textContent='.'+b('gain').value;
+  b('hueO').textContent=b('hue').value;
+  b('smthO').textContent='.'+b('smth').value;
+  const n=+b('barCount').value;
+  while(state.length<n)state.push(Math.random()*0.2);
+  state=state.slice(0,n);
+}
+['barCount','gain','hue','smth'].forEach(id=>b(id).addEventListener('input',syncSliders));
+
+let last=performance.now(),frames=0,fsec=0;
+function draw(now){
+  rafs.push(requestAnimationFrame(draw));
+  frames++;
+  if(now-fsec>1000){b('fps').textContent=frames+' fps';frames=0;fsec=now;}
+  const W=cv.clientWidth,H=cv.clientHeight;
+  const dpr=devicePixelRatio||1;
+  if(cv.width!==W*dpr||cv.height!==H*dpr){cv.width=W*dpr;cv.height=H*dpr;}
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  const hue=+b('hue').value,gain=+b('gain').value/100,smth=+b('smth').value/100;
+  const n=+b('barCount').value;
+  let raw;
+  if(running&&analyser){
+    analyser.getByteFrequencyData(data);
+    const step=Math.floor(data.length/(n*2));
+    raw=[];
+    for(let i=0;i<n;i++){let v=0;for(let k=0;k<step;k++)v+=data[i*step+k];v/=step;raw.push(v/255);}
+  } else {
+    raw=Array.from({length:n},()=>Math.random()*0.3);
+  }
+  for(let i=0;i<n;i++){state[i]=state[i]*smth+raw[i]*(1-smth);}
+  // bass/treble emphasis via gain
+  for(let i=0;i<n;i++)state[i]=Math.min(1,state[i]*(0.6+gain*1.4));
+  const pad=2,gap=Math.max(1,Math.floor(W/n*0.12));
+  const bw=(W/n)-gap;
+  for(let i=0;i<n;i++){
+    const v=state[i]*H*0.9;
+    const x=i*(bw+gap);
+    const col=`hsl(${hue+i*0.9} 90% ${42+v*55}% / 0.9)`;
+    const grd=ctx.createLinearGradient(0,H,0,H-v);
+    grd.addColorStop(0,col);
+    grd.addColorStop(1,'transparent');
+    ctx.fillStyle=grd;
+    ctx.beginPath();
+    const rr=Math.min(4,bw/2);
+    ctx.roundRect?ctx.roundRect(x,H-v,bw,v,[rr,rr,0,0]):ctx.fillRect(x,H-v,bw,v);
+    ctx.fill();
+    // top cap
+    ctx.fillStyle=`hsl(${hue+i*0.9} 100% 72%)`;
+    ctx.globalAlpha=0.95;
+    ctx.beginPath();ctx.roundRect?ctx.roundRect(x,H-v,bw,2,[1,1,0,0]):ctx.fillRect(x,H-v,bw,2);ctx.fill();
+    ctx.globalAlpha=1;
+  }
+  // baseline
+  ctx.strokeStyle='rgba(34,211,238,.15)';
+  ctx.beginPath();ctx.moveTo(0,H-1);ctx.lineTo(W,H-1);ctx.stroke();
+}
+requestAnimationFrame(draw);
+</script>
+</body></html>
